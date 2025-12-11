@@ -1,0 +1,70 @@
+rules:
+  # 1. RCE (Matches system.js)
+  - id: custom-rce-execsync
+    message: "CRITICAL: RCE detected. Executing shell commands with concatenated input."
+    languages: [javascript]
+    severity: ERROR
+    patterns:
+      - pattern: execSync(...)
+
+  # 2. SSTI (Matches frontend.js)
+  - id: custom-ssti-nunjucks
+    message: "CRITICAL: SSTI detected. Nunjucks rendering un-sanitized input."
+    languages: [javascript]
+    severity: ERROR
+    patterns:
+      - pattern: nunjucks.renderString(...)
+
+  # 3. XXE (Matches admin.js)
+  - id: custom-xxe-libxml
+    message: "CRITICAL: XXE detected. Parsing XML with 'noent: true'."
+    languages: [javascript]
+    severity: ERROR
+    patterns:
+      - pattern: |
+          libxmljs.parseXml(..., {noent: true})
+
+  # 4. Path Traversal (Matches order.js)
+  - id: custom-path-traversal
+    message: "HIGH: Path Traversal detected. User input in file path."
+    languages: [javascript]
+    severity: WARNING
+    patterns:
+      - pattern: |
+          `../../../uploads/${$VAR}`
+
+  # 5. Mass Assignment (Matches user.js) - IMPROVED
+  # This looks for db.user.update where the first argument is exactly req.body
+  - id: custom-mass-assignment-update
+    message: "HIGH: Mass Assignment detected. Updating DB directly from req.body."
+    languages: [javascript]
+    severity: WARNING
+    patterns:
+      - pattern: |
+          db.user.update(req.body, ...)
+
+  # 6. IDOR (Matches frontend.js) - NEW!
+  # This looks for queries that trust req.query.id without a session check
+  - id: custom-idor-query
+    message: "HIGH: Potential IDOR. Using req.query.id directly in DB query."
+    languages: [javascript]
+    severity: WARNING
+    patterns:
+      - pattern: |
+          where: { id: req.query.id }
+
+  # 7. Open Redirect (Matches system.js)
+  - id: custom-open-redirect
+    message: "MEDIUM: Open Redirect detected. Redirecting to variable 'url'."
+    languages: [javascript]
+    severity: WARNING
+    patterns:
+      - pattern: res.redirect(url)
+
+  # 8. SSRF (Matches system.js)
+  - id: custom-ssrf-axios
+    message: "HIGH: SSRF detected. Axios requesting arbitrary URL."
+    languages: [javascript]
+    severity: WARNING
+    patterns:
+      - pattern: requests.get(...)
