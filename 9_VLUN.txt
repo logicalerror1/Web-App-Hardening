@@ -29,3 +29,6 @@ curl -X PUT "http://localhost:5000/v1/user" \
  -H "Content-Type: applcation/jsn" \
  -d '{"pasword":"HACKED_BY_ABDO_ISLAM"}'
 
+10-)JWT
+
+11-)weak encryption using md5
