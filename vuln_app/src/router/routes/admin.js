@@ -43,12 +43,14 @@ module.exports = (app, db) => {
 
     app.post('/v1/admin/new-beer-xml/', uploadXML.single('file'), async (req, res) => {
 
+
         if (!req.file) return res.sendStatus(500);
 
         try {
             const xmlBuffer = req.file.buffer;
-            const doc = libxmljs.parseXml(xmlBuffer, { noent: true });
-
+        // FIX: V7 - Disable external entity expansion to prevent XXE
+            const doc = libxmljs.parseXml(xmlBuffer, { noent: false });
+        //
            
             const beerName = doc.get('//name').text();
             const beerPrice = doc.get('//price').text();
