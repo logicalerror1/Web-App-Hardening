@@ -1,34 +1,21 @@
 'user strict';
 
-const express = require('express'),
-    //morgan = require('morgan'),
-    config = require('./config'),
-    router = require('./router'),
-    bodyParser = require('body-parser'),
-    db = require('./orm')
-
-
-    
-    
-    
+const express = require('express');
+const config = require('./config');
+const router = require('./router');
+const bodyParser = require('body-parser');
+const db = require('./orm');
+const helmet= require('helmet');
+const rateLimit = require('express-rate-limit');
+require('dotenv').config();
 const sjs = require('sequelize-json-schema');
-
-
-const app = express()
+const app = express();
+app.use(helme());
 const PORT = config.PORT;
-//OPTIONAL: Security headers?????
-// app.use((req, res, next) => {
-//     res.header('Content-Type', 'application/json');
-//     res.header("Access-Control-Allow-Origin", "*");
-//     res.header("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE");
-//     res.header("Access-Control-Allow-Headers", "Origin, X-Requested-With, Content-Type, Accept");
-//     next();
-//   });
-
-//OPTIONAL: Activate Logging
-// app.use(morgan('combined'));
-app.use(bodyParser.json());
-
+const limiter = ratelimit({ windowMs: 15 * 16 * 1000
+			     max:100});
+app.use(limiter);
+app.use(bodyparser.json());
 
 //session middleware
 var cookieParser = require('cookie-parser');

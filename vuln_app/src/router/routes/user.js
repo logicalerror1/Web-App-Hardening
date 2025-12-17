@@ -1,430 +1,200 @@
-'user strcit';
-const config = require('./../../config')
-var jwt = require("jsonwebtoken");
-const { user } = require('../../orm');
-module.exports = (app,db) => {
+'use strict';
 
-    //Get all users
-    /**
-     * GET /v1/admin/users/ 
-     * @summary List all users (Unverified JWT Manipulation)(Authorization Bypass)
-     * @tags admin
-     * @security BearerAuth
-     * @return {array<User>} 200 - success response - application/json
-     */
-    app.get('/v1/admin/users/', (req,res) =>{
-        //console.log("auth",req.headers.authorization)
-        if (req.headers.authorization){ 
-        const user_object = jwt.verify(req.headers.authorization.split(' ')[1],"SuperSecret")
-        db.user.findAll({include: "beers"})
-            .then((users) => {
-                if (user_object.role =='admin'){
-                    //console.log("fetch users")
-                res.json(users);
-                }       
-                else{ 
-                res.json({error:"Not Admin, try again"})
-            }
-                
-                return;
-            }).catch((e) =>{
-                res.json({error:"error fetching users"+e})
-            });
-        
+require('dotenv').config();
+const jwt = require("jsonwebtoken");
+const bcrypt = require('bcrypt');
+const otplib = require('otplib');
+const validator = require('validator'); // Prefer validator library over regex
+const config = require('./../../config');
 
-        }else{
-            res.json({error:"missing Token in header"})
-            return;
+module.exports = (app, db) => {
+
+    // --- HELPER: Secure JWT Middleware ---
+    const verifyToken = (req, res, next) => {
+        const authHeader = req.headers.authorization;
+        if (!authHeader) return res.status(401).json({ error: "Missing Token" });
+
+        const token = authHeader.split(' ')[1];
+        if (!token) return res.status(401).json({ error: "Invalid Token Format" });
+
+        jwt.verify(token, process.env.JWT_SECRET, (err, decoded) => {
+            if (err) return res.status(403).json({ error: "Invalid or Expired Token" });
+            req.decoded = decoded; // Store secure payload
+            next();
+        });
+    };
+
+    // --- HELPER: Admin Check ---
+    const isAdmin = (req, res, next) => {
+        if (req.decoded && req.decoded.role === 'admin') {
+            next();
+        } else {
+            res.status(403).json({ error: "Access Denied: Admins Only" });
         }
-        
+    };
 
 
+    // --- 1. Fix Authorization Bypass (Get All Users) ---
+    app.get('/v1/admin/users/', verifyToken, isAdmin, (req, res) => {
+        // Now secure: Only verified admins reach here
+        db.user.findAll({ include: "beers" })
+            .then(users => res.json(users))
+            .catch(e => res.status(500).json({ error: "Database error" }));
     });
-    //Get information about other users
-    /**
-     * GET /v1/user/{user_id}
-     * @summary Get information of a specific user
-     * @tags user
-     * @param {integer} user_id.path.required - user id to get information
-     * @return {array<User>} 200 - success response - application/json
-     */
-     app.get('/v1/user/:id', (req,res) =>{
-        db.user.findOne({include: 'beers',where: { id : req.params.id}})
+
+
+    // --- 2. Fix IDOR (Get Specific User) ---
+    app.get('/v1/user/:id', verifyToken, (req, res) => {
+        // Allow if Admin OR if requesting own ID
+        if (req.decoded.id != req.params.id && req.decoded.role !== 'admin') {
+            return res.status(403).json({ error: "Access Denied" });
+        }
+
+        db.user.findOne({ include: 'beers', where: { id: req.params.id } })
             .then(user => {
-                res.json(user);
+                if (!user) return res.status(404).json({ error: "User not found" });
+                // Don't send password hash back
+                const safeUser = user.toJSON();
+                delete safeUser.password;
+                res.json(safeUser);
             });
     });
-    /**
-     * DELETE /v1/user/{user_id} 
-     * @summary Delete a specific user (Broken Function Level Authentication)
-     * @tags user
-     * @param {integer} user_id.path.required - user id to delete (Broken Function Level)
-     * @return {array<User>} 200 - success response - application/json
-     */
-         app.delete('/v1/user/:id', (req,res) =>{
-            db.user.destroy({where: { id : req.params.id}})
-                .then(user => {
-                    res.json({result: "deleted"});
-                })
-                .catch(e =>{
-                    res.json({error:e})
+
+
+    // --- 3. Fix Broken Function Level Auth (Delete User) ---
+    app.delete('/v1/user/:id', verifyToken, isAdmin, (req, res) => {
+        // Only admins can delete users
+        db.user.destroy({ where: { id: req.params.id } })
+            .then(() => res.json({ result: "deleted" }))
+            .catch(e => res.status(500).json({ error: e }));
+    });
+
+
+    // --- 4. Fix ReDoS & Weak Password (Create User) ---
+    app.post('/v1/user/', (req, res) => {
+        const { email, name, password, address } = req.body;
+        // Role is forced to 'user' to prevent Privilege Escalation
+        const role = 'user';
+
+        // FIX: Use validator lib (Safe from ReDoS)
+        if (!validator.isEmail(email)) {
+            return res.status(400).json({ error: "Invalid email format" });
+        }
+
+        // FIX: Secure Password Hashing
+        const hashedPassword = bcrypt.hashSync(password, 10);
+
+        db.user.create({
+            name,
+            email,
+            role,
+            address,
+            password: hashedPassword
+        }).then(new_user => res.json(new_user))
+          .catch(e => res.status(500).json({ error: "Creation failed" }));
+    });
+
+
+    // --- 5. Fix CSRF (Get/Post Love Beer) ---
+    // NOTE: In a real API, 'GET' should not modify state. 
+    // This route should ideally be removed, but we secure it with Auth checks.
+    app.get('/v1/love/:beer_id', verifyToken, (req, res) => {
+        const userId = req.decoded.id; // Take from trusted Token, NOT query param
+        const beerId = req.params.beer_id;
+
+        db.beer.findByPk(beerId).then(beer => {
+            if (!beer) return res.status(404).json({ error: "Beer not found" });
+
+            db.user.findByPk(userId).then(user => {
+                if (!user) return res.status(404).json({ error: "User not found" });
+
+                user.hasBeer(beer).then(alreadyLoved => {
+                    if (!alreadyLoved) {
+                        user.addBeer(beer, { through: 'user_beers' });
+                    }
+                    if (req.query.front) {
+                        return res.redirect(`/beer?id=${beerId}&user=${userId}&message=Loved!`);
+                    }
+                    res.json({ message: "Beer loved successfully" });
                 });
+            });
         });
-    /**
-     * POST /v1/user/
-     * @summary create a new user (Weak Password)(ReDos - Regular Expression Denial of Service)
-     * @description   "email": "aaaaaaaaa@aaaaaaaaaaaaaaaaaaaaaaaa.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa{",
-     * @tags user
-     * @param {User} request.body.required - User
-     * @return {object} 200 - user response
-     */
-    app.post('/v1/user/', (req,res) =>{
-
-        const userEmail = req.body.email;
-        const userName = req.body.name;
-        const userRole = req.body.role
-        const userPassword = req.body.password;
-        const userAddress = req.body.address
-        //validate email using regular expression
-        var emailExpression = /^([a-zA-Z0-9_\.\-])+\@(([a-zA-Z0-9\-])+\.)+([a-zA-Z0-9]{2,4})+$/;
-        var regex = new RegExp(emailExpression)
-            console.log(emailExpression.test(userEmail))
-            if (!emailExpression.test(userEmail)){
-                res.json({error:"regular expression of email couldn't be validated"})
-                return
-            }
-        const new_user = db.user.create(
-            {
-                name:userName,
-                email:userEmail,
-                role:userRole,
-                address:userAddress,
-                password:userPassword
-            }).then(new_user => {
-                res.json(new_user);
-            })
-                
-
     });
-         /**
-     * GET /v1/love/{beer_id}
-     * @summary make a user love a beer(CSRF - Client Side Request Forgery GET)
-     * @tags user
-     * @param {integer} beer_id.path.required - Beer Id
-     * @param {integer} id.query - User ID
-     * @param {boolean} front.query - is it a frontend redirect ?
-     * @return {object} 200 - user response
-     */
-          app.get('/v1/love/:beer_id', (req,res) =>{
-            var current_user_id = req.query.id;
-            var front = true;
-            if (req.query.front){
-                front = req.query.front
-            }
-            if(!req.query.id){ // if not provided take from session
-                res.redirect("/?message=No Id")
-                return
-            }
-            
-            
-            const beer_id = req.params.beer_id;
 
-            db.beer.findOne({
-                where:{id:beer_id}
-            }).then((beer) => {
-                const user = db.user.findOne(
-                    {where: {id : current_user_id}},
-                    {include: 'beers'}).then(current_user => {
-                        if(current_user){
-                        current_user.hasBeer(beer).then(result => {
-                            if(!result){
-                                current_user.addBeer(beer, { through: 'user_beers' })
-                            }
-                            if(front){
-                                let love_beer_message = "You Just Loved this beer!!"
-                                res.redirect("/beer?user="+ current_user_id+"&id="+beer_id+"&message="+love_beer_message)
-                                return
-                            }
-                            res.json(current_user);
-                        })
-                    }
-                    else{
-                        res.json({error:'user Id was not found'});
-                    }
-                })
-            })
-            .catch((e)=>{
-                res.json(e)
-            })
+
+    // --- 6. Fix Insecure JWT Implementation (Login Token) ---
+    app.post('/v1/user/token', (req, res) => {
+        const { email, password } = req.body;
+
+        db.user.findOne({ where: { email } }).then(user => {
+            if (!user) return res.status(404).json({ error: 'User not found' });
+
+            // FIX: Compare with Bcrypt
+            if (bcrypt.compareSync(password, user.password)) {
+                // FIX: Use Strong Secret & Algorithm
+                const token = jwt.sign(
+                    { id: user.id, role: user.role },
+                    process.env.JWT_SECRET,
+                    { expiresIn: '1h', algorithm: 'HS256' }
+                );
+                res.status(200).json({ jwt: token, user: user });
+            } else {
+                res.status(401).json({ error: 'Invalid credentials' });
+            }
         });
-     /**
-     * POST /v1/love/{beer_id}
-     * @summary make a user love a beer(CSRF - Client Side Request Forgery POST)
-     * @tags user
-     * @param {integer} beer_id.path.required - Beer Id
-     * @param {integer} id.query - User ID
-     * @param {boolean} front.query - is it a frontend redirect ?
-     * @return {object} 200 - user response
-     */
-         app.post('/v1/love/:beer_id', (req,res) =>{
-            var current_user_id = 1;
-            var front = false;
-            if (req.query.front){
-                front = req.query.front
-            }
-            if(!req.query.id){ // if not provided take from session
-                //if using jwt take from header:
-                if(!req.session.user.id){
-                    //if not jwt found
-                    if(!req.headers.authorization){
-                        res.json({error:"Couldn't find user token"})
-                    }
-                    current_user_id = jwt.decode(req.headers.authorization.split(' ')[1]).id
-                }
-                current_user_id = req.session.user.id
-            }
-            current_user_id = req.query.id
-            
-            const beer_id = req.params.beer_id;
-
-            db.beer.findOne({
-                where:{id:beer_id}
-            }).then((beer) => {
-                const user = db.user.findOne(
-                    {where: {id : current_user_id}},
-                    {include: 'beers'}).then(current_user => {
-                        if(current_user){
-                        current_user.hasBeer(beer).then(result => {
-                            if(!result){
-                                current_user.addBeer(beer, { through: 'user_beers' })
-                            }
-                            if(front){
-                                let love_beer_message = "You Loved this beer!!"
-                                res.redirect("/beer?user="+ current_user_id+"&id="+beer_id+"&message="+love_beer_message)
-                            }
-                            res.json(current_user);
-                        })
-                    }
-                    else{
-                        res.json({error:'user Id was not found'});
-                    }
-                })
-            })
-            .catch((e)=>{
-                res.json(e)
-            })
-        });
-
-   /**
-     * LoginUserDTO for login
-     * @typedef {object} LoginUserDTO
-     * @property {string} email.required - email
-     * @property {string} password.required - password
-     */
-    /**
-     * POST /v1/user/token
-     * @summary login endpoint to get jwt token - (Insecure JWT Implementation)
-     * @tags user
-     * @param {LoginUserDTO} request.body.required - user login credentials - application/json       
-     * @return {string} 200 - success
-     * @return {string} 404 - user not found
-     * @return {string} 401 - wrong password
-    */
-     app.post('/v1/user/token', (req,res) =>{
-
-        const userEmail = req.body.email;
-        const userPassword = req.body.password;
-        const user = db.user.findAll({
-            where: {
-              email: userEmail
-            }}).then(user => {
-                if(user.length == 0){
-                    res.status(404).send({error:'User was not found'})
-                return;
-                }
-
-                const md5 = require('md5')
-                //compare password with and without hash
-                if((user[0].password == userPassword) || (md5(user[0].password) == userPassword)){
-                    //Add jwt token
-                    //logge in logichere
-                    const jwtTokenSecret = "SuperSecret"
-                    const payload = { "id": user[0].id,"role":user[0].role }
-                    var token = jwt.sign(payload, jwtTokenSecret, {
-                        expiresIn: 86400, // 24 hours
-                      });
-                    res.status(200).json({
-                        jwt:token,
-                        user:user,
-                        
-                    });
-                    return;
-                }
-                res.status(401).json({error:'Password was not correct'})
-            })
-                
-
-    });
-    /**
-     * LoginUserDTO for login
-     * @typedef {object} LoginUserDTO
-     * @property {string} email.required - email
-     * @property {string} password.required - password
-     */
-    /**
-     * POST /v1/user/login
-     * @summary login page - (Session fixation)(user enumeration)(insecure password/no hashing)
-     * @tags user
-     * @param {LoginUserDTO} request.body.required - user login credentials - application/json       
-     * @return {string} 200 - success
-     * @return {string} 404 - user not found
-     * @return {string} 401 - wrong password
-    */
-     app.post('/v1/user/login', (req,res) =>{
-
-       
-        const userEmail = req.body.email;
-        const userPassword = req.body.password;
-        const user = db.user.findAll({
-            where: {
-              email: userEmail
-            }}).then(user => {
-                if(user.length == 0){
-                    res.status(404).send({error:'User was not found'})
-                return;
-                }
-
-                const md5 = require('md5')
-                //compare password with and without hash
-                if((user[0].password == userPassword) || (md5(user[0].password) == userPassword)){
-                    //Add jwt token
-                    //logge in logichere
-                    res.status(200).json(user);
-                    return;
-                }
-                res.status(401).json({error:'Password was not correct'})
-            })
-                
-
-    });
-
-    /**
-     * PUT /v1/user/{user_id}
-     * @summary update user - (horizontal privesc)(mass assignment/BOLA)
-     * @tags user
-     * @param {User} request.body.required - update credentials - application/json       
-     * @param {integer} user_id.path.required
-     * @return {string} 200 - success
-     * @return {string} 404 - user not found
-     * @return {string} 401 - wrong password
-    */
-     app.put('/v1/user/:id', (req,res) =>{
-
-        const userId = req.params.id;
-        const userPassword = req.password;
-        const userEmail = req.body.email
-        const userProfilePic = req.body.profile_pic
-        const userAddress = req.body.address
-        const user = db.user.update(req.body, {
-            where: {
-                id : userId
-            }},
-            )
-        .then((user)=>{
-            res.send(user)
-        })
-
-                
-            
-                
-
     });
 
 
-    /**
-     * PUT /v1/admin/promote/{user_id}
-     * @summary promote to admin - (vertical privesc)
-     * @tags admin
-     * @param {integer} user_id.path.required
-     * @return {string} 200 - success
-     * @return {string} 404 - user not found
-     * @return {string} 401 - wrong password
-    */
-     app.put('/v1/admin/promote/:id', (req,res) =>{
+    // --- 7. Fix Mass Assignment (Update User) ---
+    app.put('/v1/user/:id', verifyToken, (req, res) => {
+        // Users can only update their own profile
+        if (req.decoded.id != req.params.id) {
+            return res.status(403).json({ error: "Access Denied" });
+        }
 
-        const userId = req.params.id;
-        const user = db.user.update({role:'admin'}, {
-            where: {
-                id : userId
-            }}
-            )
-        .then((user)=>{
-            res.send(user)
-        })
+        // FIX: Whitelist only safe fields (No 'role', No 'password')
+        const safeUpdates = {
+            email: req.body.email,
+            profile_pic: req.body.profile_pic,
+            address: req.body.address,
+            name: req.body.name
+        };
 
-                
-            
-                
-
+        db.user.update(safeUpdates, { where: { id: req.params.id } })
+            .then(() => res.json({ message: "Profile Updated" }))
+            .catch(e => res.status(500).json({ error: "Update failed" }));
     });
 
-    /**
-    * POST /v1/user/{user_id}/validate-otp
-    * @summary Validate One Time Password - (Broken Authorization/2FA)(Auth Credentials in URL)(lack of rate limiting)
-    * @tags user
-    * @param {integer} user_id.path.required
-    * @param {string} seed.query - otp seed
-    * @param {string} token.query.required - token to be supplied by the user and validated against the seed
-    * @return {string} 200 - success
-    * @return {string} 401 - invalid token
-   */
-    app.post('/v1/user/:id/validate-otp', (req,res) =>{
 
-       const userId = req.params.id;
-       const user = db.user.findOne({
-           where: {
-             id: userId
-           }}).then(user => {
-               if(user.length == 0){
-                   res.status(404).send({error:'User was not found'})
-               return;
-               }
-            
-            const otplib = require('otplib')
+    // --- 8. Fix Privilege Escalation (Promote Admin) ---
+    app.put('/v1/admin/promote/:id', verifyToken, isAdmin, (req, res) => {
+        // Secure: Only real admins can reach here via middleware
+        db.user.update({ role: 'admin' }, { where: { id: req.params.id } })
+            .then(() => res.json({ message: "User promoted to Admin" }));
+    });
 
-            const seed = req.query.seed || 'SUPERSECUREOTP'; // user supplied seed or hard coded one
-            const userToken = req.query.token;
 
-            const GeneratedToken = otplib.authenticator.generate(seed);
+    // --- 9. Fix Broken 2FA (Validate OTP) ---
+    app.post('/v1/user/:id/validate-otp', verifyToken, (req, res) => {
+        // Do not accept seed from query (Client Side). Seed must be secret on server.
+        // For this fix, we assume the seed is stored in DB or Env.
+        const serverSeed = process.env.OTP_SEED || 'SERVER_SIDE_SECRET_SEED'; 
+        const userToken = req.body.token; // Pass token in Body, not URL
 
-            const isValid = otplib.authenticator.check(userToken, GeneratedToken);
-            // or
-            //const isValid = authenticator.verify({ userToken, GeneratedToken });
-               if(isValid || userToken == req.session.otp){
-                   const jwtTokenSecret = "SuperSecret"
-                   const payload = { "id": user.id,"role":user.role }
-                   var jwttoken = jwt.sign(payload, jwtTokenSecret, {
-                       expiresIn: 86400, // 24 hours
-                     });
-                   res.status(200).json({
-                       jwt:jwttoken,
-                       user:user,
-                       
-                   });
-                   return;
-               }
-               if(req.query.seed){
-                req.session.otp = GeneratedToken // add generated token to session
-                req.session.save(function(err) {
-                    // session saved
-                  })
-                res.status(401).json({error:'OTP was not correct, got:' + GeneratedToken})
-                return;
-               }
-               res.status(401).json({error:'OTP was not correct'})
-           })
-               
+        // Validate
+        const isValid = otplib.authenticator.check(userToken, serverSeed);
 
-   });
+        if (isValid) {
+            // Issue JWT
+            const token = jwt.sign(
+                { id: req.decoded.id, role: req.decoded.role, mfa: true },
+                process.env.JWT_SECRET,
+                { expiresIn: '24h' }
+            );
+            res.json({ jwt: token, message: "MFA Validated" });
+        } else {
+            res.status(401).json({ error: "Invalid OTP Code" });
+        }
+    });
 
 };
