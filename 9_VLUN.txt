@@ -2,7 +2,7 @@
 http://localhost:5000/profile?id=2/3/4
 
 2-)XSS
-http://localhost:5000/profile?id=<script>alert(22)</script>
+http://localhost:5000/?message=<script>alert(22)</script>
 
 3-)Insecure Redirect
 http://localhost:5000/v1/redirect/?url=https://evil.com
